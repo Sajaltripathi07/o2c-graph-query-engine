@@ -6,7 +6,9 @@ const { buildGraphOverview, getNodeNeighbors, getStats, getDb } = require('./gra
 const { SYSTEM_PROMPT } = require('./prompt');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: "*"
+}));
 app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
