@@ -1,0 +1,57 @@
+.graph-panel {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.cytoscape-container {
+  flex: 1;
+  width: 100%;
+  background: radial-gradient(ellipse at 50% 50%, #0d1829 0%, #080c18 100%);
+  background-image:
+    radial-gradient(ellipse at 50% 50%, #0d1829 0%, #080c18 100%),
+    linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px);
+  background-size: 100% 100%, 40px 40px, 40px 40px;
+}
+
+.graph-controls {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(10,14,26,0.85);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 12px;
+}
+
+.graph-controls button {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.graph-controls button:hover {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
+.graph-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
