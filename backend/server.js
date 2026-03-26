@@ -9,7 +9,7 @@ const app = express();
 app.use(cors({
   origin: [
       "http://localhost:3000",
-    "https://o2c-graph-query-engine.vercel.app/"
+    "https://o2c-graph-query-engine.vercel.app"
   ],
   credentials: true
 }));
