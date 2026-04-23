@@ -19,13 +19,11 @@ app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-
 const GEMINI_MODELS = [
   "gemini-2.5-flash",
   "gemini-1.5-flash",
   "gemini-1.5-pro"
 ];
-
 
 async function retry(fn, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -38,22 +36,14 @@ async function retry(fn, retries = 3) {
   }
 }
 
-
 async function callGemini(userQuery, conversationHistory = []) {
-
   const messages = [
-    {
-      role: "user",
-      parts: [{ text: SYSTEM_PROMPT }]
-    },
+    { role: "user", parts: [{ text: SYSTEM_PROMPT }] },
     ...conversationHistory.slice(-6).map(m => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }]
     })),
-    {
-      role: "user",
-      parts: [{ text: userQuery }]
-    }
+    { role: "user", parts: [{ text: userQuery }] }
   ];
 
   const body = {
@@ -77,12 +67,7 @@ async function callGemini(userQuery, conversationHistory = []) {
 
       if (!res.ok) {
         const errText = await res.text();
-
-        if (res.status === 503) {
-          console.warn(`⚠️ ${model} overloaded (503). Trying next model...`);
-          continue;
-        }
-
+        if (res.status === 503) continue;
         throw new Error(`Gemini API error (${res.status}): ${errText}`);
       }
 
@@ -90,15 +75,44 @@ async function callGemini(userQuery, conversationHistory = []) {
       return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
     } catch (err) {
-      console.warn(` Error with ${model}: ${err.message}`);
-
-      if (model === GEMINI_MODELS[GEMINI_MODELS.length - 1]) {
-        throw err;
-      }
+      if (model === GEMINI_MODELS[GEMINI_MODELS.length - 1]) throw err;
     }
   }
 }
 
+function isBillingFlowQuery(query) {
+  const q = query.toLowerCase();
+  return q.includes("billing") && (q.includes("flow") || q.includes("trace"));
+}
+
+function extractBillingId(query) {
+  const match = query.match(/\b\d{6,}\b/);
+  return match ? match[0] : null;
+}
+
+function buildBillingFlowSQL(billingId) {
+  return `
+SELECT
+  b.billingDocument,
+  b.billingDocumentType,
+  b.creationDate AS billingDate,
+  b.totalNetAmount,
+  b.transactionCurrency,
+  b.accountingDocument,
+  j.glAccount,
+  j.amountInTransactionCurrency AS journalAmount,
+  j.postingDate,
+  p.amountInTransactionCurrency AS paymentAmount,
+  p.clearingDate
+FROM billing_documents b
+LEFT JOIN journal_entries j
+  ON b.accountingDocument = j.accountingDocument
+LEFT JOIN payments p
+  ON j.accountingDocument = p.accountingDocument
+WHERE b.billingDocument = '${billingId}'
+LIMIT 50;
+`;
+}
 
 const OFF_TOPIC_PATTERNS = [
   /\b(poem|story|joke|recipe|weather|capital of|president of|who is|wikipedia|football|cricket|movie|song|lyrics|code|python|javascript|html|css|sql injection|drop table|delete from|truncate)\b/i,
@@ -107,7 +121,6 @@ const OFF_TOPIC_PATTERNS = [
 
 function isOffTopic(query) {
   const lower = query.toLowerCase();
-
   if (
     lower.includes('order') || lower.includes('billing') || lower.includes('delivery') ||
     lower.includes('payment') || lower.includes('customer') || lower.includes('product') ||
@@ -117,19 +130,16 @@ function isOffTopic(query) {
   ) {
     return false;
   }
-
   return OFF_TOPIC_PATTERNS.some(p => p.test(query));
 }
 
 function queryAll(db, sql, params = []) {
   const stmt = db.prepare(sql);
   stmt.bind(params);
-
   const rows = [];
   while (stmt.step()) {
     rows.push(stmt.getAsObject());
   }
-
   stmt.free();
   return rows;
 }
@@ -137,35 +147,24 @@ function queryAll(db, sql, params = []) {
 async function executeQuery(sql) {
   const forbidden = /^\s*(drop|delete|insert|update|alter|create|truncate)/i;
   if (forbidden.test(sql)) throw new Error('Only SELECT queries are allowed');
-
   const db = await getDb();
   return queryAll(db, sql);
 }
 
-
 function formatResults(rows) {
   if (!rows || rows.length === 0) return 'No results found.';
-
   if (rows.length === 1) {
-    return Object.entries(rows[0])
-      .map(([k, v]) => `**${k}:** ${v}`)
-      .join('\n');
+    return Object.entries(rows[0]).map(([k, v]) => `**${k}:** ${v}`).join('\n');
   }
-
   const cols = Object.keys(rows[0]);
-
   const header = '| ' + cols.join(' | ') + ' |';
   const sep = '| ' + cols.map(() => '---').join(' | ') + ' |';
-
   const body = rows.slice(0, 25)
     .map(r => '| ' + cols.map(c => String(r[c] ?? '')).join(' | ') + ' |')
     .join('\n');
-
   const extra = rows.length > 25 ? `\n_...and ${rows.length - 25} more rows_` : '';
-
   return `${header}\n${sep}\n${body}${extra}\n\n_${rows.length} record(s)_`;
 }
-
 
 app.get('/api/graph', async (req, res) => {
   try {
@@ -192,7 +191,6 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-
 app.post('/api/chat', async (req, res) => {
   const { query, history = [] } = req.body;
 
@@ -209,6 +207,38 @@ app.post('/api/chat', async (req, res) => {
     });
   }
 
+  if (isBillingFlowQuery(query)) {
+    const billingId = extractBillingId(query);
+
+    if (!billingId) {
+      return res.json({
+        answer: "Please provide a valid billing document number.",
+        sql: null,
+        rows: null
+      });
+    }
+
+    try {
+      const sql = buildBillingFlowSQL(billingId);
+      const rows = await executeQuery(sql);
+
+      const answer = `Billing Flow for Document ${billingId}:\n\n- Billing → Accounting (journal entries)\n- Accounting → Payments\n\nUpstream sales order / delivery data is not available in this dataset.\n\n${formatResults(rows)}`;
+
+      return res.json({
+        answer,
+        sql,
+        rows: rows.slice(0, 50)
+      });
+
+    } catch (err) {
+      return res.json({
+        answer: `Failed to fetch billing flow: ${err.message}`,
+        sql: null,
+        rows: null
+      });
+    }
+  }
+
   try {
     const raw = await retry(() => callGemini(query, history));
 
@@ -222,7 +252,7 @@ app.post('/api/chat', async (req, res) => {
 
     if (!parsed.sql) {
       return res.json({
-        answer: 'No SQL generated.',
+        answer: parsed.explanation || raw || 'No SQL generated.',
         sql: null,
         rows: null
       });
@@ -243,7 +273,6 @@ Give a short insight (max 100 words).
 `;
 
       const summary = await retry(() => callGemini(summaryPrompt));
-
       answer = summary + '\n\n' + formatResults(rows);
 
     } catch (err) {
@@ -258,7 +287,6 @@ Give a short insight (max 100 words).
     });
   }
 });
-
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
