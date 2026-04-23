@@ -6,38 +6,41 @@ const { buildGraphOverview, getNodeNeighbors, getStats, getDb } = require('./gra
 const { SYSTEM_PROMPT } = require('./prompt');
 
 const app = express();
+
 app.use(cors({
   origin: [
-      "http://localhost:3000",
+    "http://localhost:3000",
     "https://o2c-graph-query-engine.vercel.app"
   ],
   credentials: true
 }));
+
 app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
-const OFF_TOPIC_PATTERNS = [
-  /\b(poem|story|joke|recipe|weather|capital of|president of|who is|wikipedia|football|cricket|movie|song|lyrics|code|python|javascript|html|css|sql injection|drop table|delete from|truncate)\b/i,
-  /\b(what is [a-z]+ [a-z]+|how do i|tell me about [^o])\b/i,
+
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-pro"
 ];
 
-function isOffTopic(query) {
-  const lower = query.toLowerCase();
-  if (
-    lower.includes('order') || lower.includes('billing') || lower.includes('delivery') ||
-    lower.includes('payment') || lower.includes('customer') || lower.includes('product') ||
-    lower.includes('invoice') || lower.includes('sales') || lower.includes('journal') ||
-    lower.includes('plant') || lower.includes('material') || lower.includes('flow') ||
-    lower.includes('amount') || lower.includes('status') || lower.includes('document')
-  ) {
-    return false;
+
+async function retry(fn, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
   }
-  return OFF_TOPIC_PATTERNS.some(p => p.test(query));
 }
 
+
 async function callGemini(userQuery, conversationHistory = []) {
+
   const messages = [
     {
       role: "user",
@@ -61,28 +64,72 @@ async function callGemini(userQuery, conversationHistory = []) {
     }
   };
 
-  const res = await fetch(GEMINI_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  for (const model of GEMINI_MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Gemini API error: ${err}`);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        timeout: 10000
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+
+        if (res.status === 503) {
+          console.warn(`⚠️ ${model} overloaded (503). Trying next model...`);
+          continue;
+        }
+
+        throw new Error(`Gemini API error (${res.status}): ${errText}`);
+      }
+
+      const data = await res.json();
+      return data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+
+    } catch (err) {
+      console.warn(` Error with ${model}: ${err.message}`);
+
+      if (model === GEMINI_MODELS[GEMINI_MODELS.length - 1]) {
+        throw err;
+      }
+    }
+  }
+}
+
+
+const OFF_TOPIC_PATTERNS = [
+  /\b(poem|story|joke|recipe|weather|capital of|president of|who is|wikipedia|football|cricket|movie|song|lyrics|code|python|javascript|html|css|sql injection|drop table|delete from|truncate)\b/i,
+  /\b(what is [a-z]+ [a-z]+|how do i|tell me about [^o])\b/i,
+];
+
+function isOffTopic(query) {
+  const lower = query.toLowerCase();
+
+  if (
+    lower.includes('order') || lower.includes('billing') || lower.includes('delivery') ||
+    lower.includes('payment') || lower.includes('customer') || lower.includes('product') ||
+    lower.includes('invoice') || lower.includes('sales') || lower.includes('journal') ||
+    lower.includes('plant') || lower.includes('material') || lower.includes('flow') ||
+    lower.includes('amount') || lower.includes('status') || lower.includes('document')
+  ) {
+    return false;
   }
 
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return OFF_TOPIC_PATTERNS.some(p => p.test(query));
 }
 
 function queryAll(db, sql, params = []) {
   const stmt = db.prepare(sql);
   stmt.bind(params);
+
   const rows = [];
   while (stmt.step()) {
     rows.push(stmt.getAsObject());
   }
+
   stmt.free();
   return rows;
 }
@@ -90,26 +137,35 @@ function queryAll(db, sql, params = []) {
 async function executeQuery(sql) {
   const forbidden = /^\s*(drop|delete|insert|update|alter|create|truncate)/i;
   if (forbidden.test(sql)) throw new Error('Only SELECT queries are allowed');
-  const d = await getDb();
-  return queryAll(d, sql);
+
+  const db = await getDb();
+  return queryAll(db, sql);
 }
 
+
 function formatResults(rows) {
-  if (!rows || rows.length === 0) return 'No results found for this query.';
+  if (!rows || rows.length === 0) return 'No results found.';
+
   if (rows.length === 1) {
-    const entries = Object.entries(rows[0]);
-    if (entries.length === 1) return `**${entries[0][0]}:** ${entries[0][1]}`;
-    return entries.map(([k, v]) => `**${k}:** ${v}`).join('\n');
+    return Object.entries(rows[0])
+      .map(([k, v]) => `**${k}:** ${v}`)
+      .join('\n');
   }
+
   const cols = Object.keys(rows[0]);
+
   const header = '| ' + cols.join(' | ') + ' |';
   const sep = '| ' + cols.map(() => '---').join(' | ') + ' |';
-  const rowsStr = rows.slice(0, 25)
+
+  const body = rows.slice(0, 25)
     .map(r => '| ' + cols.map(c => String(r[c] ?? '')).join(' | ') + ' |')
     .join('\n');
+
   const extra = rows.length > 25 ? `\n_...and ${rows.length - 25} more rows_` : '';
-  return `${header}\n${sep}\n${rowsStr}${extra}\n\n_${rows.length} record(s) found_`;
+
+  return `${header}\n${sep}\n${body}${extra}\n\n_${rows.length} record(s)_`;
 }
+
 
 app.get('/api/graph', async (req, res) => {
   try {
@@ -136,6 +192,7 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+
 app.post('/api/chat', async (req, res) => {
   const { query, history = [] } = req.body;
 
@@ -145,7 +202,7 @@ app.post('/api/chat', async (req, res) => {
 
   if (isOffTopic(query)) {
     return res.json({
-      answer: 'This system is designed to answer SAP Order-to-Cash questions only.',
+      answer: 'This system only supports SAP O2C queries.',
       sql: null,
       rows: null,
       outOfScope: true
@@ -153,7 +210,7 @@ app.post('/api/chat', async (req, res) => {
   }
 
   try {
-    const raw = await callGemini(query, history);
+    const raw = await retry(() => callGemini(query, history));
 
     let parsed;
     try {
@@ -165,7 +222,7 @@ app.post('/api/chat', async (req, res) => {
 
     if (!parsed.sql) {
       return res.json({
-        answer: 'Could not generate SQL for this query.',
+        answer: 'No SQL generated.',
         sql: null,
         rows: null
       });
@@ -176,7 +233,6 @@ app.post('/api/chat', async (req, res) => {
 
     try {
       rows = await executeQuery(parsed.sql);
-      const resultStr = formatResults(rows);
 
       const summaryPrompt = `
 User question: "${query}"
@@ -186,24 +242,30 @@ ${JSON.stringify(rows.slice(0, 10), null, 2)}
 Give a short insight (max 100 words).
 `;
 
-      const summary = await callGemini(summaryPrompt);
+      const summary = await retry(() => callGemini(summaryPrompt));
 
-      answer = summary + '\n\n' + resultStr;
+      answer = summary + '\n\n' + formatResults(rows);
 
     } catch (err) {
-      answer = `SQL execution failed: ${err.message}\n\n${parsed.sql}`;
+      answer = `SQL failed: ${err.message}\n\n${parsed.sql}`;
     }
 
     res.json({ answer, sql: parsed.sql, rows: rows.slice(0, 50) });
 
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    res.status(500).json({
+      error: "AI service temporarily unavailable. Please retry."
+    });
   }
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
 
 const PORT = process.env.PORT || 3001;
+
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
